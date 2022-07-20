@@ -91,7 +91,7 @@ func newGetCmd() *cobra.Command {
 }
 
 func getTuples(pageSize *int32, pageToken *string) func(cmd *cobra.Command, _ []string) error {
-	return func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, _ []string) error {
 		if cmd.Flags().Changed(FlagSubject) {
 			return fmt.Errorf("usage of --%s is not supported anymore, use --%s or --%s respectively", FlagSubject, FlagSubjectID, FlagSubjectSet)
 		}
