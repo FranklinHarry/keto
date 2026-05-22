@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/ory/keto/internal/check"
 	"github.com/ory/keto/internal/driver"
+	"github.com/ory/keto/internal/driver/config"
 	client "github.com/ory/keto/internal/httpclient"
 	"github.com/ory/keto/internal/namespace"
 	"github.com/ory/keto/internal/testhelpers"
@@ -105,7 +107,7 @@ func buildBatchURL(baseURL, maxDepth string) string {
 
 func TestCheckRESTHandler(t *testing.T) {
 	nspaces := []*namespace.Namespace{{
-		Name: "check handler",
+		Name: "ns",
 	}}
 
 	reg := driver.NewSqliteTestRegistry(t, driver.WithNamespaces(nspaces))
@@ -152,24 +154,15 @@ func TestCheckRESTHandler(t *testing.T) {
 			})
 
 			t.Run("case=returns denied on unknown namespace", func(t *testing.T) {
-				resp, err := ts.Client().Get(ts.URL + suite.base + "?" + (&ketoapi.RelationTuple{
-					Namespace: "not" + nspaces[0].Name,
-					Object:    "o",
-					Relation:  "r",
-					SubjectID: new("s"),
-				}).ToURLQuery().Encode())
+				rt := testhelpers.APITupleFromString(t, "not:o#r@s")
+				resp, err := ts.Client().Get(ts.URL + suite.base + "?" + rt.ToURLQuery().Encode())
 				require.NoError(t, err)
 
 				assertDenied(t, resp)
 			})
 
 			t.Run("case=returns allowed", func(t *testing.T) {
-				rt := &ketoapi.RelationTuple{
-					Namespace: nspaces[0].Name,
-					Object:    "o",
-					Relation:  "r",
-					SubjectID: new("s"),
-				}
+				rt := testhelpers.APITupleFromString(t, "ns:o#r@s")
 				testhelpers.MapAndInsertTuples(t, reg, rt)
 
 				q := rt.ToURLQuery()
@@ -180,12 +173,8 @@ func TestCheckRESTHandler(t *testing.T) {
 			})
 
 			t.Run("case=returns denied", func(t *testing.T) {
-				resp, err := ts.Client().Get(ts.URL + suite.base + "?" + (&ketoapi.RelationTuple{
-					Namespace: nspaces[0].Name,
-					Object:    "foo",
-					Relation:  "r",
-					SubjectID: new("s"),
-				}).ToURLQuery().Encode())
+				rt := testhelpers.APITupleFromString(t, "ns:foo#r@s")
+				resp, err := ts.Client().Get(ts.URL + suite.base + "?" + rt.ToURLQuery().Encode())
 				require.NoError(t, err)
 
 				assertDenied(t, resp)
@@ -195,16 +184,11 @@ func TestCheckRESTHandler(t *testing.T) {
 }
 
 func TestBatchCheckHandler(t *testing.T) {
-	nspaces := []*namespace.Namespace{{Name: "batch-check"}}
+	nspaces := []*namespace.Namespace{{Name: "ns"}}
 	reg := driver.NewSqliteTestRegistry(t, driver.WithNamespaces(nspaces))
 	h := check.NewHandler(reg)
 
-	rt := &ketoapi.RelationTuple{
-		Namespace: nspaces[0].Name,
-		Object:    "o",
-		Relation:  "r",
-		SubjectID: new("s"),
-	}
+	rt := testhelpers.APITupleFromString(t, "ns:o#r@s")
 	testhelpers.MapAndInsertTuples(t, reg, rt)
 
 	// REST setup.
@@ -238,7 +222,7 @@ func TestBatchCheckHandler(t *testing.T) {
 		t.Run("protocol=REST", func(t *testing.T) {
 			tuples := make([]client.Relationship, 11)
 			for i := range tuples {
-				tuples[i] = client.Relationship{Namespace: "n", Object: "o", Relation: "r", SubjectId: new("s")}
+				tuples[i] = relationshipFromAPITuple(testhelpers.APITupleFromString(t, "ns:o#r@s"))
 			}
 			bodyBytes, err := json.Marshal(client.BatchCheckPermissionBody{Tuples: tuples})
 			require.NoError(t, err)
@@ -251,10 +235,7 @@ func TestBatchCheckHandler(t *testing.T) {
 		t.Run("protocol=gRPC", func(t *testing.T) {
 			tuples := make([]*rts.RelationTuple, 11)
 			for i := range tuples {
-				tuples[i] = &rts.RelationTuple{
-					Namespace: "n", Object: "o", Relation: "r",
-					Subject: &rts.Subject{Ref: &rts.Subject_Id{Id: "s"}},
-				}
+				tuples[i] = testhelpers.APITupleFromString(t, "ns:o#r@s").ToProto()
 			}
 			_, err := checkClient.BatchCheck(t.Context(), &rts.BatchCheckRequest{Tuples: tuples, MaxDepth: 5})
 			st, ok := status.FromError(err)
@@ -267,14 +248,14 @@ func TestBatchCheckHandler(t *testing.T) {
 	t.Run("case=returns correct results per tuple", func(t *testing.T) {
 		// Three tuples: allowed, not-allowed, unknown namespace.
 		restTuples := []client.Relationship{
-			{Namespace: nspaces[0].Name, Object: "o", Relation: "r", SubjectId: new("s")},  // allowed
-			{Namespace: nspaces[0].Name, Object: "o2", Relation: "r", SubjectId: new("s")}, // not allowed
-			{Namespace: "n2", Object: "o", Relation: "r", SubjectId: new("s")},             // unknown namespace
+			relationshipFromAPITuple(testhelpers.APITupleFromString(t, "ns:o#r@s")),  // allowed
+			relationshipFromAPITuple(testhelpers.APITupleFromString(t, "ns:o2#r@s")), // not allowed
+			relationshipFromAPITuple(testhelpers.APITupleFromString(t, "n2:o#r@s")),  // unknown namespace
 		}
 		grpcTuples := []*rts.RelationTuple{
-			{Namespace: nspaces[0].Name, Object: "o", Relation: "r", Subject: &rts.Subject{Ref: &rts.Subject_Id{Id: "s"}}},  // allowed
-			{Namespace: nspaces[0].Name, Object: "o2", Relation: "r", Subject: &rts.Subject{Ref: &rts.Subject_Id{Id: "s"}}}, // not allowed
-			{Namespace: "n2", Object: "o", Relation: "r", Subject: &rts.Subject{Ref: &rts.Subject_Id{Id: "s"}}},             // unknown namespace
+			testhelpers.APITupleFromString(t, "ns:o#r@s").ToProto(),  // allowed
+			testhelpers.APITupleFromString(t, "ns:o2#r@s").ToProto(), // not allowed
+			testhelpers.APITupleFromString(t, "n2:o#r@s").ToProto(),  // unknown namespace
 		}
 
 		t.Run("protocol=REST", func(t *testing.T) {
@@ -306,4 +287,135 @@ func TestBatchCheckHandler(t *testing.T) {
 			require.Equal(t, "The requested resource could not be found", resp.Results[2].Error)
 		})
 	})
+}
+
+// relationshipFromAPITuple converts a ketoapi.RelationTuple to a client.Relationship
+// for use in REST batch check requests.
+func relationshipFromAPITuple(tuple *ketoapi.RelationTuple) client.Relationship {
+	rel := client.Relationship{
+		Namespace: tuple.Namespace,
+		Object:    tuple.Object,
+		Relation:  tuple.Relation,
+	}
+	if tuple.SubjectID != nil {
+		rel.SubjectId = tuple.SubjectID
+	} else if tuple.SubjectSet != nil {
+		rel.SubjectSet = &client.SubjectSet{
+			Namespace: tuple.SubjectSet.Namespace,
+			Object:    tuple.SubjectSet.Object,
+			Relation:  tuple.SubjectSet.Relation,
+		}
+	}
+	return rel
+}
+
+func TestCheckStrictModeLimit(t *testing.T) {
+	depthLimitScenario.WithStrict(true).Run(t, func(t *testing.T, reg driver.Registry) {
+		require.NoError(t, reg.Config(t.Context()).Set(config.KeyLimitMaxReadDepth, 2))
+		h := check.NewHandler(reg)
+
+		// This tuple has a depth of 3, which exceeds the configured limit of 2, causing to hit the limitation.
+		tupleQuery := testhelpers.APITupleFromString(t, "Resource:doc#union@User:Alice").ToURLQuery()
+
+		t.Run("case=HTTP: returns 422 with limitation kind", func(t *testing.T) {
+			router := httprouterx.NewRouterPublic()
+			h.RegisterReadRoutes(router)
+			ts := httptest.NewServer(router)
+			t.Cleanup(ts.Close)
+
+			resp, err := ts.Client().Get(ts.URL + check.RouteBase + "?max-depth=2&" + tupleQuery.Encode())
+			require.NoError(t, err)
+			body := readBody(t, resp)
+
+			require.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode, "%s", body)
+			require.Equal(t, "The check could not be completed", gjson.GetBytes(body, "error.message").String())
+			require.Contains(t, gjson.GetBytes(body, "error.reason").String(), string(check.LimitationMaxDepthExceeded))
+		})
+
+		t.Run("case=gRPC: returns FailedPrecondition with limitation kind", func(t *testing.T) {
+			checkClient := newTestGRPCCheckClient(t, h)
+			tuple := testhelpers.APITupleFromString(t, "Resource:doc#union@User:Alice")
+			_, err := checkClient.Check(t.Context(), &rts.CheckRequest{
+				Tuple:    tuple.ToProto(),
+				MaxDepth: 2,
+			})
+			require.Error(t, err)
+
+			st, ok := status.FromError(err)
+			require.True(t, ok)
+			require.Equal(t, codes.FailedPrecondition, st.Code())
+			require.Equal(t, "The check could not be completed", st.Message())
+
+			var ei *errdetails.ErrorInfo
+			for _, d := range st.Details() {
+				if info, ok := d.(*errdetails.ErrorInfo); ok {
+					ei = info
+					break
+				}
+			}
+			require.NotNil(t, ei)
+			require.Contains(t, ei.Reason, string(check.LimitationMaxDepthExceeded))
+		})
+	})
+}
+
+func TestBatchCheckLimitHandler(t *testing.T) {
+	for _, scenario := range []testhelpers.Scenario{
+		widthLimitScenario,
+		widthLimitScenario.WithStrict(true),
+	} {
+		scenario.Run(t, func(t *testing.T, reg driver.Registry) {
+			require.NoError(t, reg.Config(t.Context()).Set(config.KeyLimitMaxReadWidth, 1))
+			h := check.NewHandler(reg)
+			strict := scenario.Strict
+
+			// Bob is only in the truncated branch → MembershipUnknown at width=1.
+			tuple := testhelpers.APITupleFromString(t, "Resource:doc#readers@User:Bob")
+
+			t.Run("case=REST: strict mode surfaces limitation in error field", func(t *testing.T) {
+				router := httprouterx.NewRouterPublic()
+				h.RegisterReadRoutes(router)
+				ts := httptest.NewServer(router)
+				t.Cleanup(ts.Close)
+
+				bodyBytes, err := json.Marshal(client.BatchCheckPermissionBody{
+					Tuples: []client.Relationship{relationshipFromAPITuple(tuple)},
+				})
+				require.NoError(t, err)
+
+				resp, err := ts.Client().Post(
+					fmt.Sprintf("%s%s?max-depth=10", ts.URL, check.BatchRoute),
+					"application/json", bytes.NewReader(bodyBytes))
+				require.NoError(t, err)
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+
+				var result client.BatchCheckPermissionResult
+				require.NoError(t, json.Unmarshal(readBody(t, resp), &result))
+				require.Len(t, result.Results, 1)
+				require.False(t, result.Results[0].Allowed)
+				if strict {
+					require.NotNil(t, result.Results[0].Error)
+					require.Contains(t, *result.Results[0].Error, string(check.LimitationMaxWidthExceeded))
+				} else {
+					require.Empty(t, result.Results[0].Error)
+				}
+			})
+
+			t.Run("case=gRPC: strict mode surfaces limitation in error field", func(t *testing.T) {
+				checkClient := newTestGRPCCheckClient(t, h)
+				resp, err := checkClient.BatchCheck(t.Context(), &rts.BatchCheckRequest{
+					Tuples:   []*rts.RelationTuple{tuple.ToProto()},
+					MaxDepth: 10,
+				})
+				require.NoError(t, err)
+				require.Len(t, resp.Results, 1)
+				require.False(t, resp.Results[0].Allowed)
+				if strict {
+					require.Contains(t, resp.Results[0].Error, string(check.LimitationMaxWidthExceeded))
+				} else {
+					require.Empty(t, resp.Results[0].Error)
+				}
+			})
+		})
+	}
 }
